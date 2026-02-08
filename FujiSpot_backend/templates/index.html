@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FujiSpot Finder</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
+            /* 优化了日语字体 */
+        }
+
+        #map {
+            height: 100vh;
+            width: 100%;
+        }
+
+        /* 悬浮控制面板样式 */
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: white;
+            padding: 20px;
+            z-index: 1000;
+            border-radius: 8px;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.2);
+            width: 320px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        h2 {
+            margin-top: 0;
+            color: #333;
+            font-size: 20px;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+        }
+
+        p {
+            color: #666;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        /* 按钮样式 */
+        button {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background-color: #45a049;
+        }
+
+        button.secondary {
+            background-color: #2196F3;
+        }
+
+        button.secondary:hover {
+            background-color: #1e88e5;
+        }
+
+        /* 状态栏 */
+        #status {
+            font-size: 13px;
+            color: #444;
+            margin-top: 15px;
+            background: #f9f9f9;
+            padding: 10px;
+            border-radius: 4px;
+            border-left: 4px solid #ccc;
+        }
+
+        /* 上传区域 */
+        .upload-area {
+            border: 2px dashed #bbb;
+            background: #fdfdfd;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 15px;
+            cursor: pointer;
+            color: #666;
+            border-radius: 4px;
+        }
+
+        .upload-area:hover {
+            border-color: #4CAF50;
+            background: #f0fff0;
+            color: #4CAF50;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="controls">
+        <h2>🗻 FujiSpot Finder</h2>
+        <p>YOLOv8とDBSCANを用いた<br>富士山撮影スポット発見システム</p>
+
+        <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+            📷 写真をアップロード<br>
+            <span style="font-size:12px">(自動認識 + GPS抽出)</span>
+        </div>
+        <input type="file" id="fileInput" style="display: none;" onchange="uploadImage()">
+
+        <hr style="border: 0; border-top: 1px solid #eee; margin: 15px 0;">
+
+        <button class="secondary" onclick="generateSimulatedData()">1. シミュレーションデータ生成 (50点)</button>
+        <button onclick="fetchClusters()">2. スポット分析実行 (DBSCAN)</button>
+
+        <div id="status">システム準備完了。待機中...</div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script>
+        // 1. 初始化地图 (中心设在富士山-河口湖区域)
+        var map = L.map('map').setView([35.49, 138.75], 11);
+
+        // 加载 OpenStreetMap 底图
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors',
+            maxZoom: 18
+        }).addTo(map);
+
+        var markers = []; // 存储地图上的标记
+
+        // --- 功能 A: 生成模拟数据 ---
+        function generateSimulatedData() {
+            updateStatus("⏳ ランダムデータを生成しています...");
+            fetch('/simulate', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    updateStatus(`✅ ${data.message}`);
+                    fetchClusters(); // 生成完自动刷新
+                })
+                .catch(err => updateStatus("❌ 生成に失敗しました。バックエンドを確認してください。"));
+        }
+
+        // --- 功能 B: 获取并显示聚类结果 (核心) ---
+        function fetchClusters() {
+            updateStatus("🔄 DBSCANクラスタリング分析を実行中...");
+
+            fetch('/clusters')
+                .then(res => res.json())
+                .then(data => {
+                    // 1. 清除旧标记
+                    markers.forEach(m => map.removeLayer(m));
+                    markers = [];
+
+                    if (data.clusters && data.clusters.length === 0) {
+                        updateStatus("⚠️ データ不足（3点未満）のためクラスタリングできません。データをアップロードまたは収集してください。");
+                        return;
+                    }
+
+                    updateStatus(`✅ 分析完了: ${data.n_clusters_found} 箇所の撮影スポットを発見 (総データ数: ${data.total_spots})`);
+
+                    // 2. 遍历所有点并画图
+                    data.data.forEach(spot => {
+                        var color = '#777'; // 噪声点默认灰色
+                        var radius = 5;
+                        var opacity = 0.6;
+
+                        // 如果属于某个名所 (cluster_id >= 0)
+                        if (spot.cluster_id >= 0) {
+                            // 给不同的簇分配不同的颜色
+                            var colors = ['#FF0000', '#0000FF', '#008000', '#FFA500', '#800080', '#00CED1'];
+                            color = colors[spot.cluster_id % colors.length];
+                            radius = 9;     // 名所的点大一点
+                            opacity = 0.9;  // 更不透明
+                        }
+
+                        // 添加圆形标记
+                        var marker = L.circleMarker([spot.lat, spot.lon], {
+                            color: 'white',      // 描边白色
+                            weight: 1,
+                            fillColor: color,    // 填充颜色
+                            fillOpacity: opacity,
+                            radius: radius
+                        }).addTo(map);
+
+                        // --- 3. 构建弹窗内容 (图片展示逻辑) ---
+                        var popupHtml = `
+                            <div style="text-align:center; font-family:sans-serif;">
+                                <div style="font-size:14px; margin-bottom:5px; color:${color}; font-weight:bold;">
+                                    ${spot.cluster_id >= 0 ? "📸 撮影スポット #" + spot.cluster_id : "ノイズ点 (Noise)"}
+                                </div>
+                                <div style="font-size:12px; color:#666; margin-bottom:5px;">
+                                    データ元: ${spot.source} (ID: ${spot.id})
+                                </div>
+                        `;
+
+                        // 只有当 filename 存在时，才显示图片标签
+                        if (spot.filename) {
+                            popupHtml += `
+                                <img src="/static/uploads/${spot.filename}" 
+                                     style="width:200px; height:auto; border-radius:6px; box-shadow:0 2px 5px rgba(0,0,0,0.2); margin-top:5px;"
+                                     alt="Fuji Photo">
+                            `;
+                        } else {
+                            popupHtml += `<div style="color:#999; font-size:12px;">(画像データなし)</div>`;
+                        }
+
+                        popupHtml += `</div>`; // 闭合div
+
+                        marker.bindPopup(popupHtml);
+                        markers.push(marker);
+                    });
+                })
+                .catch(err => {
+                    console.error(err);
+                    updateStatus("❌ データ取得失敗。バックエンドは起動していますか？");
+                });
+        }
+
+        // --- 功能 C: 上传图片检测 ---
+        function uploadImage() {
+            var input = document.getElementById('fileInput');
+            if (input.files.length === 0) return;
+
+            var formData = new FormData();
+            formData.append("image", input.files[0]);
+
+            updateStatus("🚀 アップロード中 & YOLOv8検出実行中...");
+
+            fetch('/detect', {
+                method: 'POST',
+                body: formData
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.is_fuji) {
+                        if (data.has_gps) {
+                            updateStatus(`🗻 <b>富士山を検出！</b><br>GPS抽出完了、地図に追加しました。`);
+                            fetchClusters(); // 成功后刷新地图
+                        } else {
+                            updateStatus(`🗻 <b>富士山を検出</b><br>⚠️ GPS情報がないため位置特定できません。`);
+                        }
+                    } else {
+                        updateStatus(`❌ 富士山は検出されませんでした (YOLO Filtered)`);
+                    }
+                    // 清空 input 方便下次上传同一张图
+                    input.value = '';
+                })
+                .catch(err => {
+                    console.error(err);
+                    updateStatus("❌ アップロード失敗。ネットワークまたはバックエンドを確認してください。");
+                });
+        }
+
+        // 更新状态栏文字
+        function updateStatus(htmlText) {
+            var statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = htmlText;
+            // 如果是错误信息，边框变红；否则变灰
+            if (htmlText.includes("❌")) {
+                statusDiv.style.borderLeftColor = "#ff4444";
+            } else if (htmlText.includes("✅")) {
+                statusDiv.style.borderLeftColor = "#4CAF50";
+            } else {
+                statusDiv.style.borderLeftColor = "#ccc";
+            }
+        }
+
+        // 页面加载时自动刷新一次数据
+        fetchClusters();
+    </script>
+</body>
+
+</html>

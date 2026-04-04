@@ -1,9 +1,8 @@
-# utils.py
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 
 def get_decimal_from_dms(dms, ref):
-    """把度分秒(DMS)转成十进制经纬度"""
+    """DMSを10進法の緯度・経度に変換"""
     degrees = dms[0]
     minutes = dms[1]
     seconds = dms[2]
@@ -16,8 +15,7 @@ def get_decimal_from_dms(dms, ref):
 
 def get_image_gps(image_path):
     """
-    读取图片，提取GPS信息。
-    返回: (latitude, longitude) 或者 None
+    画像を読み込み、GPS情報を抽出
     """
     try:
         image = Image.open(image_path)
@@ -41,5 +39,5 @@ def get_image_gps(image_path):
         
         return None
     except Exception as e:
-        print(f"GPS提取错误: {e}")
+        print(f"GPSの取得エラー: {e}")
         return None

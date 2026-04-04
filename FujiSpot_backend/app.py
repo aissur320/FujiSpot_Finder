@@ -4,35 +4,34 @@ from flask import Flask, request, jsonify, render_template
 from ultralytics import YOLO
 from utils import get_image_gps
 from sklearn.cluster import DBSCAN
+import random
 
+# Flask初期化
 app = Flask(__name__)
 
-# ================= 配置区域 =================
-# 建议使用相对路径，这样无论你在哪里运行都不会报错
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'weights', 'best.pt')
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'uploads')
 CONF_THRESHOLD = 0.15
 
-# DBSCAN 参数
-EPS_KM = 0.5  # 半径 500米
+# DBSCAN 
+EPS_KM = 0.5  # 探索半径0.5km
 MIN_SAMPLES = 3
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-print(f"正在加载 YOLO 模型: {MODEL_PATH}")
+print(f"Loading YOLO: {MODEL_PATH}")
 model = YOLO(MODEL_PATH)
-print("模型加载完成！")
+print("Loading complete")
 
-# 内存数据库
+# データベース
 valid_spots = []
 
-# --- 1. 核心修复：加载前端页面 ---
+# --- フロントエンドと連携 ---
 @app.route('/')
 def index():
-    # Flask 会自动去 'templates' 文件夹找 index.html
     return render_template('index.html')
 
-# --- 2. 图片检测接口 (含 Flickr 支持) ---
+# --- 富士山検出インターフェース ---
 @app.route('/detect', methods=['POST'])
 def detect_image():
     if 'image' not in request.files:
@@ -42,11 +41,11 @@ def detect_image():
     save_path = os.path.join(UPLOAD_FOLDER, file.filename)
     file.save(save_path)
     
-    # 获取手动传入的 GPS (来自 Flickr 爬虫)
+    # 入力されたGPSデータを取得
     manual_lat = request.form.get('lat')
     manual_lon = request.form.get('lon')
     
-    # YOLO 推理
+    # YOLO推理
     results = model.predict(save_path, conf=CONF_THRESHOLD, save=False)
     
     is_fuji = len(results[0].boxes) > 0
@@ -55,20 +54,20 @@ def detect_image():
 
     if is_fuji:
         gps = None
-        # 优先使用手动传入的 GPS
+        # 入力されたGPSを最優先
         if manual_lat and manual_lon:
             gps = (float(manual_lat), float(manual_lon))
-            print(f"📍 使用外部传入坐标: {gps}")
-        # 否则尝试读取 EXIF
+            print(f"Use externally provided coordinates: {gps}")
+        # そうでなければ、EXIFを読み込む
         elif not gps:
             gps = get_image_gps(save_path)
-            if gps: print(f"📍 使用 EXIF 坐标: {gps}")
+            if gps: print(f"Use EXIF coordinates: {gps}")
 
         if gps:
             response_data['has_gps'] = True
             response_data['location'] = {'lat': gps[0], 'lon': gps[1]}
             
-            # 存入数据库 (包含 filename 用于前端显示)
+            # データベースに保存
             valid_spots.append({
                 'id': len(valid_spots) + 1,
                 'lat': gps[0],
@@ -79,15 +78,14 @@ def detect_image():
     
     return jsonify(response_data)
 
-# --- 3. 模拟数据接口 ---
+# --- モックデータインターフェース ---
 @app.route('/simulate', methods=['POST'])
 def simulate_data():
-    import random
-    # 清空旧数据 (可选)
+    # 古いデータを削除（ここは任意）
     # global valid_spots
     # valid_spots = []
     
-    # 模拟两个热点: 河口湖大桥, 忠灵塔
+    # ホットスポットをシミュレート
     centers = [(35.504, 138.759), (35.500, 138.801)]
     
     count = 0
@@ -101,34 +99,34 @@ def simulate_data():
             'lat': lat,
             'lon': lon,
             'source': 'simulation',
-            'filename': None # 模拟数据没有图片
+            'filename': None
         })
         count += 1
         
-    return jsonify({'message': f'已生成 {count} 个模拟数据'})
+    return jsonify({'message': f'{count} mock data points have been generated'})
 
-# --- 4. DBSCAN 聚类接口 ---
+# --- DBSCANクラスタリングインターフェース ---
 @app.route('/clusters', methods=['GET'])
 def get_clusters():
     if len(valid_spots) < MIN_SAMPLES:
-        return jsonify({'message': '数据不足', 'clusters': []})
+        return jsonify({'message': 'Insufficient data', 'clusters': []})
     
-    # 准备数据
+    # データの準備
     coords = np.array([[spot['lat'], spot['lon']] for spot in valid_spots])
     coords_rad = np.radians(coords)
     
-    # 计算参数
+    # パラメータ計算
     kms_per_radian = 6371.0088
     epsilon = EPS_KM / kms_per_radian
     
-    # 运行算法
+    # アルゴリズムの実行
     db = DBSCAN(eps=epsilon, min_samples=MIN_SAMPLES, metric='haversine', algorithm='ball_tree')
     db.fit(coords_rad)
     
     cluster_labels = db.labels_
     n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
     
-    # 整理结果
+    # 結果を整理
     results = []
     for i, spot in enumerate(valid_spots):
         spot_info = spot.copy()
